@@ -1,31 +1,33 @@
-import React, { useMemo, useState } from "react";
+import {deleteIngredient} from "../lib/ingredients";
+import RequireLogin from "../components/RequireLogin";
+// Trang: Kho thực phẩm — xem, tìm kiếm và lọc nguyên liệu đang có.
+import IngredientCatalogResults from "../components/IngredientCatalogResults";
+import { matchesSearch } from "../lib/search";
+import SearchField from "../components/SearchField";
+import FoodImage from "../components/FoodImage";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
-  TextInput,
   ScrollView,
   Pressable,
   StyleSheet,
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import Constants from "expo-constants";
+import { getCurrentUserId } from "../lib/auth";
 import {
   ArrowLeft,
   Plus,
-  Search,
   SlidersHorizontal,
   ScanLine,
   Refrigerator,
   Snowflake,
   Package,
-  Leaf,
-  Sparkles,
-  ChevronRight,
-  Clock3,
   AlertTriangle,
   CheckCircle2,
-  ChefHat,
   ShoppingBasket,
   MoreVertical,
   LayoutGrid,
@@ -60,112 +62,116 @@ type Ingredient = {
   location: Location;
   daysLeft: number;
   emoji: string;
+  image?: string | null;
   category: string;
 };
 
-const INITIAL_INGREDIENTS: Ingredient[] = [
-  {
-    id: 1,
-    name: "Thịt bò Fuji phi lê",
-    description: "Đóng gói hút chân không",
-    quantity: "400g",
-    location: "Ngăn mát",
-    daysLeft: 1,
-    emoji: "🥩",
-    category: "Thịt",
-  },
-  {
-    id: 2,
-    name: "Súp lơ baby hữu cơ",
-    description: "Rau củ tươi Đà Lạt",
-    quantity: "300g",
-    location: "Ngăn mát",
-    daysLeft: 2,
-    emoji: "🥦",
-    category: "Rau củ",
-  },
-  {
-    id: 3,
-    name: "Sữa chua men sống Probi",
-    description: "Lốc 4 hộp",
-    quantity: "260ml",
-    location: "Ngăn mát",
-    daysLeft: 14,
-    emoji: "🥛",
-    category: "Sữa",
-  },
-  {
-    id: 4,
-    name: "Trứng gà ta",
-    description: "Trứng gà tươi",
-    quantity: "8 quả",
-    location: "Ngăn mát",
-    daysLeft: 9,
-    emoji: "🥚",
-    category: "Trứng",
-  },
-  {
-    id: 5,
-    name: "Phô mai Mozzarella",
-    description: "Phô mai bào sợi",
-    quantity: "250g",
-    location: "Ngăn mát",
-    daysLeft: 3,
-    emoji: "🧀",
-    category: "Sữa",
-  },
-  {
-    id: 6,
-    name: "Cá hồi đông lạnh",
-    description: "Cá hồi phi lê",
-    quantity: "500g",
-    location: "Ngăn đông",
-    daysLeft: 20,
-    emoji: "🐟",
-    category: "Hải sản",
-  },
-  {
-    id: 7,
-    name: "Gạo ST25",
-    description: "Gạo thơm đặc sản",
-    quantity: "2kg",
-    location: "Đồ khô",
-    daysLeft: 90,
-    emoji: "🍚",
-    category: "Ngũ cốc",
-  },
-  {
-    id: 8,
-    name: "Cà rốt Đà Lạt",
-    description: "Rau củ tươi",
-    quantity: "500g",
-    location: "Ngăn mát",
-    daysLeft: 0,
-    emoji: "🥕",
-    category: "Rau củ",
-  },
-];
+type LocationFilter = Location | "Tất cả";
 
-type StatusFilter = "all" | "expiring" | "expired";
+type StatusFilter = "all" | "fresh" | "expiring" | "expired";
 
 const LOCATIONS: {
-  key: Location;
+  key: LocationFilter;
   icon: React.ComponentType<any>;
 }[] = [
+  { key: "Tất cả", icon: LayoutGrid },
   { key: "Ngăn mát", icon: Refrigerator },
   { key: "Ngăn đông", icon: Snowflake },
   { key: "Đồ khô", icon: Package },
 ];
+const API_URL = (
+  process.env.EXPO_PUBLIC_API_URL?.trim() ||
+  `http://${Constants.expoConfig?.hostUri?.split(":")[0]}:3000`
+).replace(/\/+$/, "");
 
-export default function PantryScreen() {
+const getEmoji = (category: string) => {
+  const icons: Record<string, string> = {
+    Thịt: "🥩",
+    Trứng: "🥚",
+    "Rau củ": "🥦",
+    "Hải sản": "🐟",
+    Sữa: "🥛",
+    "Ngũ cốc": "🍚",
+    Nấm: "🍄",
+    Đậu: "🫘",
+    "Trái cây": "🍎",
+    "Gia vị": "🧄",
+  };
+
+  return icons[category] || "🥗";
+};
+
+const loadPantryFromMySQL = async (): Promise<Ingredient[]> => {
+  const userId = await getCurrentUserId();
+
+  const response = await fetch(`${API_URL}/api/pantry/${userId}`);
+  const result = await response.json();
+
+  if (!response.ok || result.success !== true) {
+    throw new Error(result.message || "Không thể tải kho thực phẩm");
+  }
+
+  return result.data.map((item: any) => ({
+    id: Number(item.id),
+    name: item.name,
+    description: item.category || "Nguyên liệu trong kho",
+    quantity: `${Number(item.quantity)}${item.unit ? ` ${item.unit}` : ""}`,
+    location: item.location?.includes("mát") ? "Ngăn mát" : item.location?.includes("đông") ? "Ngăn đông" : "Đồ khô",
+    daysLeft: item.daysLeft === null ? 9999 : Number(item.daysLeft),
+    emoji: getEmoji(item.category),
+    image: item.image_url,
+    category: item.category || "Khác",
+  }));
+};
+function PantryContent({initialSearch}:{initialSearch:string}) {
   const router = useRouter();
 
-  const [ingredients, setIngredients] =
-    useState<Ingredient[]>(INITIAL_INGREDIENTS);
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const [search, setSearch] = useState("");
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+
+      const loadData = async () => {
+        try {
+          setLoading(true);
+
+          const data = await loadPantryFromMySQL();
+
+          if (active) {
+            setIngredients(data);
+          }
+        } catch (error) {
+          console.error("Lỗi tải kho:", error);
+
+          if (active) {
+            setIngredients([]);
+            Alert.alert(
+              "Lỗi",
+              error instanceof Error
+                ? error.message
+                : "Không thể tải dữ liệu kho",
+            );
+          }
+        } finally {
+          if (active) {
+            setLoading(false);
+          }
+        }
+      };
+
+      loadData();
+
+      return () => {
+        active = false;
+      };
+    }, []),
+  );
+
+  const [search, setSearch] = useState(initialSearch);
   const [selectedLocation, setSelectedLocation] =
-    useState<Location>("Ngăn mát");
+    useState<LocationFilter>("Tất cả");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
   const total = ingredients.length;
@@ -173,13 +179,14 @@ export default function PantryScreen() {
   const freshCount = ingredients.filter((item) => item.daysLeft > 3).length;
 
   const expiringCount = ingredients.filter(
-    (item) => item.daysLeft > 0 && item.daysLeft <= 3,
+    (item) => item.daysLeft >= 0 && item.daysLeft <= 3,
   ).length;
 
-  const expiredCount = ingredients.filter((item) => item.daysLeft <= 0).length;
+  const expiredCount = ingredients.filter((item) => item.daysLeft < 0).length;
 
   const locationCounts = useMemo(() => {
     return {
+      "Tất cả": ingredients.length,
       "Ngăn mát": ingredients.filter((i) => i.location === "Ngăn mát").length,
       "Ngăn đông": ingredients.filter((i) => i.location === "Ngăn đông").length,
       "Đồ khô": ingredients.filter((i) => i.location === "Đồ khô").length,
@@ -188,21 +195,18 @@ export default function PantryScreen() {
 
   const filteredIngredients = useMemo(() => {
     return ingredients.filter((item) => {
-      const matchesSearch =
-        item.name.toLowerCase().includes(search.toLowerCase()) ||
-        item.category.toLowerCase().includes(search.toLowerCase());
-
-      const matchesLocation = item.location === selectedLocation;
-
+      const matchesQuery = matchesSearch(search, item.name, item.category, item.description, item.location);
+      const matchesLocation = selectedLocation === "Tất cả" || item.location === selectedLocation;
       const matchesStatus =
         statusFilter === "all" ||
+        (statusFilter === "fresh" && item.daysLeft > 3) ||
         (statusFilter === "expiring" &&
-          item.daysLeft > 0 &&
+          item.daysLeft >= 0 &&
           item.daysLeft <= 3) ||
-        (statusFilter === "expired" && item.daysLeft <= 0);
+        (statusFilter === "expired" && item.daysLeft < 0);
 
-      return matchesSearch && matchesLocation && matchesStatus;
-    });
+      return matchesQuery && matchesLocation && matchesStatus;
+    }).sort((a,b)=>a.name.trim().localeCompare(b.name.trim(),'vi',{numeric:true}));
   }, [ingredients, search, selectedLocation, statusFilter]);
 
   const goTo = (path: string, params?: Record<string, string>) => {
@@ -235,7 +239,7 @@ export default function PantryScreen() {
   };
 
   const handleIngredientAction = (item: Ingredient) => {
-    if (item.daysLeft <= 0) {
+    if (item.daysLeft < 0) {
       Alert.alert(
         "Thực phẩm đã hết hạn",
         "Hãy kiểm tra tình trạng thực phẩm và loại bỏ nếu không còn an toàn.",
@@ -243,7 +247,24 @@ export default function PantryScreen() {
       return;
     }
 
+    if (item.daysLeft <= 3) {
+      goTo("/expiring-recipe", { itemId: String(item.id) });
+      return;
+    }
     goTo("/recipes", { search: item.name });
+  };
+
+  const deletingIds=useRef(new Set<string>());
+  const removeFromPantry=async(item:Ingredient)=>{
+    const key=String(item.id);
+    if(deletingIds.current.has(key))return;
+    deletingIds.current.add(key);
+    try{
+      await deleteIngredient(key);
+      setIngredients(prev=>prev.filter(i=>String(i.id)!==key));
+    }catch(error){
+      Alert.alert('Không thể xóa',error instanceof Error?error.message:'Vui lòng thử lại.');
+    }finally{deletingIds.current.delete(key);}
   };
 
   const handleMenu = (item: Ingredient) => {
@@ -261,8 +282,7 @@ export default function PantryScreen() {
             {
               text: "Xóa",
               style: "destructive",
-              onPress: () =>
-                setIngredients((prev) => prev.filter((i) => i.id !== item.id)),
+              onPress: () => void removeFromPantry(item),
             },
           ]),
       },
@@ -271,20 +291,21 @@ export default function PantryScreen() {
   };
 
   const getExpiryLabel = (daysLeft: number) => {
-    if (daysLeft <= 0) return "Đã hết hạn";
+    if (daysLeft < 0) return "Đã hết hạn";
+    if (daysLeft === 0) return "Hết hạn hôm nay";
     if (daysLeft === 1) return "Còn 1 ngày";
     return `Còn ${daysLeft} ngày`;
   };
 
   const getExpiryColor = (daysLeft: number) => {
-    if (daysLeft <= 0) return C.red;
+    if (daysLeft < 0) return C.red;
     if (daysLeft <= 3) return C.orange;
     return C.green;
   };
 
   return (
     <SafeAreaView style={styles.screen} edges={[]}>
-      <AppHeader showNotification unreadCount={3} />
+      <AppHeader showNotification />
 
       <ScrollView
         style={styles.scroll}
@@ -314,16 +335,7 @@ export default function PantryScreen() {
             <ArrowLeft size={21} color={C.orange} />
           </Pressable>
 
-          <View style={styles.searchBox}>
-            <Search size={18} color={C.muted} />
-            <TextInput
-              style={styles.searchInput}
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Tìm kiếm nguyên liệu..."
-              placeholderTextColor="#A18B81"
-            />
-          </View>
+          <SearchField value={search} onChangeText={setSearch} placeholder="Tìm nguyên liệu, danh mục trong kho..." style={styles.searchBox} inputStyle={styles.searchInput} />
 
           <Pressable
             style={styles.smallIconButton}
@@ -359,6 +371,7 @@ export default function PantryScreen() {
           <View style={styles.statGrid}>
             {[
               {
+                key: "all",
                 title: "Tổng kho",
                 value: total,
                 sub: "nguyên liệu",
@@ -366,6 +379,7 @@ export default function PantryScreen() {
                 color: C.orange,
               },
               {
+                key: "fresh",
                 title: "Tươi ngon",
                 value: freshCount,
                 sub: "an toàn",
@@ -373,6 +387,7 @@ export default function PantryScreen() {
                 color: C.green,
               },
               {
+                key: "expiring",
                 title: "Cận date",
                 value: expiringCount,
                 sub: "≤ 3 ngày",
@@ -380,16 +395,29 @@ export default function PantryScreen() {
                 color: C.orange,
               },
               {
+                key: "expired",
                 title: "Hết hạn",
                 value: expiredCount,
                 sub: "cần xử lý",
                 bg: C.redLight,
                 color: C.red,
               },
-            ].map((stat) => (
-              <View
+            ].map((stat) => {
+              const active = statusFilter === stat.key;
+              return <Pressable
                 key={stat.title}
-                style={[styles.statCard, { backgroundColor: stat.bg }]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: active }}
+                style={[
+                  styles.statCard,
+                  { backgroundColor: stat.bg },
+                  active && styles.statCardActive,
+                ]}
+                onPress={() =>
+                  setStatusFilter((current) =>
+                    current === stat.key && stat.key !== "all" ? "all" : stat.key as StatusFilter,
+                  )
+                }
               >
                 <Text style={[styles.statTitle, { color: stat.color }]}>
                   {stat.title}
@@ -402,39 +430,11 @@ export default function PantryScreen() {
                 <Text style={[styles.statSub, { color: stat.color }]}>
                   {stat.sub}
                 </Text>
-              </View>
-            ))}
+              </Pressable>;
+            })}
           </View>
         </View>
 
-        {/* AI ALERT */}
-        <View style={styles.aiCard}>
-          <View style={styles.aiIcon}>
-            <Sparkles size={21} color={C.white} />
-          </View>
-
-          <View style={styles.aiContent}>
-            <Text style={styles.aiEyebrow}>TRỢ LÝ KHO AI</Text>
-
-            <Text style={styles.aiTitle}>
-              {expiringCount > 0
-                ? `Có ${expiringCount} nguyên liệu sắp hết hạn`
-                : "Kho thực phẩm đang được bảo quản tốt"}
-            </Text>
-
-            <Text style={styles.aiDescription}>
-              {expiringCount > 0
-                ? "Ưu tiên sử dụng thực phẩm gần hết hạn để tránh lãng phí."
-                : "Hãy tiếp tục kiểm tra và cập nhật kho thường xuyên."}
-            </Text>
-
-            <Pressable style={styles.aiButton} onPress={() => goTo("/recipes")}>
-              <ChefHat size={14} color={C.white} />
-              <Text style={styles.aiButtonText}>Xem công thức gợi ý</Text>
-              <ChevronRight size={14} color={C.white} />
-            </Pressable>
-          </View>
-        </View>
 
         {/* LOCATION */}
         <View style={styles.sectionHeader}>
@@ -505,7 +505,11 @@ export default function PantryScreen() {
               <Pressable
                 key={item.key}
                 style={[styles.filterChip, active && styles.filterChipActive]}
-                onPress={() => setStatusFilter(item.key as StatusFilter)}
+                onPress={() =>
+                  setStatusFilter((current) =>
+                    current === item.key && item.key !== "all" ? "all" : item.key as StatusFilter,
+                  )
+                }
               >
                 <Text
                   style={[styles.filterText, active && styles.filterTextActive]}
@@ -516,7 +520,18 @@ export default function PantryScreen() {
             );
           })}
         </ScrollView>
-
+        {loading && (
+          <Text
+            style={{
+              textAlign: "center",
+              color: C.orange,
+              marginVertical: 12,
+            }}
+          >
+            Đang tải kho thực phẩm...
+          </Text>
+        )}
+        <IngredientCatalogResults query={search} />
         {/* INGREDIENT LIST */}
         <View style={styles.listHeader}>
           <Text style={styles.listTitle}>Danh sách nguyên liệu</Text>
@@ -544,7 +559,7 @@ export default function PantryScreen() {
           </View>
         ) : (
           filteredIngredients.map((item) => {
-            const urgent = item.daysLeft <= 3;
+            const urgent = item.daysLeft >= 0 && item.daysLeft <= 3;
 
             return (
               <View
@@ -558,16 +573,12 @@ export default function PantryScreen() {
                   style={styles.ingredientMain}
                   onPress={() => showIngredientDetail(item)}
                 >
-                  <View
-                    style={[
-                      styles.ingredientImage,
-                      {
-                        backgroundColor: urgent ? C.peach : C.greenLight,
-                      },
-                    ]}
-                  >
-                    <Text style={styles.ingredientEmoji}>{item.emoji}</Text>
-                  </View>
+                  <FoodImage
+                    uri={item.image}
+                    style={styles.ingredientImage}
+                    resizeMode="cover"
+                    accessibilityLabel={item.name}
+                  />
 
                   <View style={styles.ingredientInfo}>
                     <Text style={styles.ingredientName} numberOfLines={1}>
@@ -616,7 +627,7 @@ export default function PantryScreen() {
 
                 <View style={styles.ingredientFooter}>
                   <Text style={styles.ingredientFooterText}>
-                    {item.daysLeft <= 0
+                    {item.daysLeft < 0
                       ? "Cần kiểm tra và xử lý"
                       : item.daysLeft <= 3
                         ? "Ưu tiên sử dụng sớm"
@@ -637,7 +648,7 @@ export default function PantryScreen() {
                           !urgent && styles.actionButtonTextLight,
                         ]}
                       >
-                        {item.daysLeft <= 0
+                        {item.daysLeft < 0
                           ? "Kiểm tra"
                           : urgent
                             ? "Gợi ý món"
@@ -664,6 +675,11 @@ export default function PantryScreen() {
   );
 }
 
+function PantryScreen() {
+ const params=useLocalSearchParams<{search?:string}>();
+ const query=typeof params.search==="string"?params.search:"";
+ return <PantryContent key={query} initialSearch={query}/>;
+}
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
@@ -821,6 +837,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 5,
     alignItems: "center",
     minHeight: 77,
+  },
+
+  statCardActive: {
+    borderWidth: 2,
+    borderColor: C.orange,
   },
 
   statTitle: {
@@ -984,12 +1005,14 @@ const styles = StyleSheet.create({
 
   locationRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 7,
   },
 
   locationButton: {
     flex: 1,
-    minWidth: 0,
+    flexBasis: "47%",
+    minWidth: 130,
     height: 37,
     borderRadius: 10,
     backgroundColor: C.white,
@@ -1260,3 +1283,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
 });
+
+// Người dùng khách cần đăng nhập trước khi truy cập chức năng cá nhân.
+export default function ProtectedPage() { return <RequireLogin><PantryScreen/></RequireLogin>; }

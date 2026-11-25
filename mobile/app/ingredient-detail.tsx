@@ -1,8 +1,10 @@
+import RequireLogin from "../components/RequireLogin";
+// Trang: Chi tiết nguyên liệu — số lượng, hạn dùng và nơi bảo quản.
+import FoodImage from "../components/FoodImage";
 import React, { useCallback, useState } from "react";
 import {
   View,
   Text,
-  Image,
   ScrollView,
   Pressable,
   StyleSheet,
@@ -10,7 +12,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { type Href, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import {
   ArrowLeft,
   MoreVertical,
@@ -46,15 +48,13 @@ const C = {
   mint: "#E9F5EB",
   red: "#C83D2B",
 };
-const FALLBACK_IMAGE =
-  "https://images.unsplash.com/photo-1542838132-92c53300491e?w=900";
 const TIPS: Record<string, string> = {
   Thịt: "Bảo quản thịt theo hướng dẫn trên bao bì, giữ lạnh đúng nhiệt độ và tránh lây nhiễm chéo với thực phẩm ăn liền.",
   "Rau củ":
     "Bảo quản rau củ phù hợp từng loại, loại bỏ phần hư hỏng và rửa sạch trước khi chế biến.",
   Sữa: "Giữ lạnh theo hướng dẫn trên bao bì, đậy kín sau khi mở và chú ý hạn sử dụng.",
 };
-export default function IngredientDetailScreen() {
+function IngredientDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : params.id;
@@ -68,7 +68,7 @@ export default function IngredientDetailScreen() {
         try {
           const found = id ? await findIngredient(id) : null;
           if (active) setIngredient(found);
-        } catch (e) {
+        } catch {
           Alert.alert("Lỗi", "Không thể đọc dữ liệu nguyên liệu.");
         } finally {
           if (active) setLoading(false);
@@ -96,7 +96,7 @@ export default function IngredientDetailScreen() {
               await deleteIngredient(ingredient.id);
               router.replace("/pantry");
             } catch (e) {
-              Alert.alert("Lỗi", "Không thể xóa nguyên liệu.");
+              Alert.alert("Không thể xóa", e instanceof Error ? e.message : "Vui lòng thử lại.");
             }
           },
         },
@@ -120,6 +120,14 @@ export default function IngredientDetailScreen() {
   const days = ingredient ? daysUntil(ingredient.expiryDate) : null;
   const urgent = days !== null && days <= 3;
   const expired = days !== null && days < 0;
+  const openRecipes = () => {
+    if (!ingredient || expired) return;
+    if (urgent) {
+      router.push({ pathname: "/expiring-recipe", params: { itemId: ingredient.id } } as Href);
+    } else {
+      router.push({ pathname: "/recipes", params: { search: ingredient.name } });
+    }
+  };
   const badge =
     days === null
       ? "Chưa có hạn dùng"
@@ -172,8 +180,8 @@ export default function IngredientDetailScreen() {
             showsVerticalScrollIndicator={false}
           >
             <View style={s.hero}>
-              <Image
-                source={{ uri: ingredient.image || FALLBACK_IMAGE }}
+              <FoodImage
+                uri={ingredient.image}
                 style={s.heroImage}
               />
               <View style={s.heroBadges}>
@@ -273,15 +281,11 @@ export default function IngredientDetailScreen() {
               </Text>
               <Pressable
                 style={s.secondaryButton}
-                onPress={() =>
-                  router.push({
-                    pathname: "/recipes",
-                    params: { search: ingredient.name },
-                  })
-                }
+                onPress={openRecipes}
+                disabled={expired}
               >
                 <UtensilsCrossed color={C.orange} size={17} />
-                <Text style={s.secondaryText}>Xem công thức</Text>
+                <Text style={s.secondaryText}>{urgent && !expired ? "Gợi ý món bằng AI" : "Xem công thức"}</Text>
                 <ChevronRight color={C.orange} size={16} />
               </Pressable>
             </View>
@@ -303,12 +307,8 @@ export default function IngredientDetailScreen() {
             </View>
             <Pressable
               style={s.mainButton}
-              onPress={() =>
-                router.push({
-                  pathname: "/recipes",
-                  params: { search: ingredient.name },
-                })
-              }
+              onPress={openRecipes}
+                 disabled={expired}
             >
               <UtensilsCrossed color="white" size={18} />
               <Text style={s.mainButtonText}>
@@ -442,3 +442,6 @@ const s = StyleSheet.create({
     flexShrink: 1,
   },
 });
+
+// Người dùng khách cần đăng nhập trước khi truy cập chức năng cá nhân.
+export default function ProtectedPage() { return <RequireLogin><IngredientDetailScreen/></RequireLogin>; }

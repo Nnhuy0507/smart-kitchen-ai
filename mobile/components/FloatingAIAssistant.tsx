@@ -14,19 +14,25 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import Constants from 'expo-constants';
+import { getAuthUser, getCurrentUserId } from '../lib/auth';
 import {
   Bot,
   X,
   Send,
   Sparkles,
-  CalendarDays,
   ChefHat,
-  ShoppingCart,
   Refrigerator,
   UtensilsCrossed,
   ArrowRight,
   RotateCcw,
 } from 'lucide-react-native';
+
+// GHI CHÚ: Mobile chỉ gọi backend của ứng dụng; Gemini API key được giữ ở backend/.env.
+const API_URL = (
+  process.env.EXPO_PUBLIC_API_URL?.trim() ||
+  `http://${Constants.expoConfig?.hostUri?.split(':')[0] || 'localhost'}:3000`
+).replace(/\/+$/, '');
 
 const C = {
   orange: '#A23A00',
@@ -51,184 +57,63 @@ type ChatMessage = {
   actionLabel?: string;
 };
 
+type IngredientInventoryParts = {
+  before: string;
+  ingredients: string[];
+  after: string;
+};
+
+function parseIngredientInventory(content: string): IngredientInventoryParts | null {
+  const match = content.match(
+    /(hiện tại bạn đang có:\s*)(?:\*\*)?([^*\n]+?)(?:\*\*)?(?=[.!?\n]|$)/i
+  );
+
+  if (!match || match.index === undefined) return null;
+
+  const ingredients = match[2]
+    .split(/\s*(?:,|;|\bvà\b)\s*/i)
+    .map((ingredient) => ingredient.trim().replace(/[.!?]+$/, ""))
+    .filter(Boolean);
+
+  if (ingredients.length < 2) return null;
+
+  const matchEnd = match.index + match[0].length;
+  return {
+    before: content.slice(0, match.index) + match[1],
+    ingredients,
+    after: content.slice(matchEnd),
+  };
+}
+
+function ingredientEmoji(ingredient: string): string {
+  const normalized = ingredient
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (normalized.includes('trung')) return '🥚';
+  if (normalized.includes('ca chua')) return '🍅';
+  if (normalized.includes('khoai tay')) return '🥔';
+  if (normalized.includes('hanh tay')) return '🧅';
+  if (normalized.includes('toi')) return '🧄';
+  if (normalized.includes('dua leo') || normalized.includes('dua chuot')) return '🥒';
+  if (normalized.includes('nho')) return '🍇';
+  return '🧺';
+}
+
 const WELCOME: ChatMessage = {
   id: 'welcome',
   role: 'assistant',
-  content:
-    'Xin chào! 👋 Mình là Smart Kitchen AI.\n\nMình có thể giúp bạn chọn món ăn, lên thực đơn, quản lý nguyên liệu, chuẩn bị danh sách mua sắm và hướng dẫn nấu ăn.\n\nHôm nay bạn cần mình giúp gì?',
+  content: 'Chào bạn! 👋 Mình là trợ lý trong bếp.\n\nMình giúp bạn hiểu công thức, thay nguyên liệu, xử lý món chưa ngon và chọn món nhanh cho bữa hiện tại.\n\nBạn đang nấu món gì, hay gặp khó ở bước nào? Việc xếp lịch ăn nhiều ngày có trong mục Thực đơn.',
 };
 
 const SUGGESTIONS = [
-  {
-    id: 'meal',
-    label: 'Lập thực đơn 7 ngày',
-    question: 'Lập thực đơn 7 ngày cho 2 người',
-    icon: CalendarDays,
-  },
-  {
-    id: 'recipes',
-    label: 'Hôm nay nấu món gì?',
-    question: 'Hôm nay tôi nên nấu món gì?',
-    icon: ChefHat,
-  },
-  {
-    id: 'pantry',
-    label: 'Món từ nguyên liệu có sẵn',
-    question: 'Gợi ý món ăn từ nguyên liệu trong tủ lạnh',
-    icon: Refrigerator,
-  },
-  {
-    id: 'shopping',
-    label: 'Lập danh sách mua sắm',
-    question: 'Tạo danh sách nguyên liệu cần mua',
-    icon: ShoppingCart,
-  },
-  {
-    id: 'cooking',
-    label: 'Hướng dẫn nấu ăn',
-    question: 'Hướng dẫn tôi nấu món ăn từng bước',
-    icon: UtensilsCrossed,
-  },
+  { id: 'salty', label: 'Canh bị mặn thì làm sao?', question: 'Tôi đang nấu canh nhưng bị mặn. Tôi nên xử lý thế nào?', icon: UtensilsCrossed },
+  { id: 'substitute', label: 'Thay nguyên liệu bị thiếu', question: 'Tôi đang nấu nhưng thiếu một nguyên liệu. Bạn giúp tôi tìm nguyên liệu thay thế được không?', icon: ChefHat },
+  { id: 'quick', label: 'Có trứng, nấu gì trong 15 phút?', question: 'Tôi có trứng và cà chua. Gợi ý tối đa 2 món cho bữa này, làm trong 15 phút và hướng dẫn ngắn gọn.', icon: Refrigerator },
+  { id: 'technique', label: 'Làm sao chiên cá không dính?', question: 'Hướng dẫn tôi chiên cá để không bị dính chảo và nát cá.', icon: ChefHat },
+  { id: 'storage', label: 'Cất thức ăn thừa thế nào?', question: 'Sau bữa ăn, tôi nên làm nguội và cất thức ăn thừa thế nào?', icon: Refrigerator },
 ];
-
-function getLocalResponse(question: string): {
-  content: string;
-  action?: ActionType;
-  actionLabel?: string;
-} {
-  const q = question.toLocaleLowerCase('vi-VN');
-
-  if (
-    q.includes('thực đơn') ||
-    q.includes('7 ngày') ||
-    q.includes('3 ngày') ||
-    q.includes('kế hoạch ăn')
-  ) {
-    return {
-      content:
-        '📅 Mình gợi ý thực đơn mẫu 3 ngày cho bạn:\n\n' +
-        'Ngày 1\n' +
-        '• Sáng: Bánh mì trứng\n' +
-        '• Trưa: Ức gà áp chảo\n' +
-        '• Tối: Salad rau củ\n\n' +
-        'Ngày 2\n' +
-        '• Sáng: Trứng cuộn rau củ\n' +
-        '• Trưa: Cơm chiên trứng\n' +
-        '• Tối: Mì Ý sốt cà chua\n\n' +
-        'Ngày 3\n' +
-        '• Sáng: Bánh mì trứng\n' +
-        '• Trưa: Ức gà áp chảo\n' +
-        '• Tối: Salad rau củ\n\n' +
-        'Đây là thực đơn minh họa. Bạn có thể mở trang Thực đơn để sắp xếp bữa ăn theo từng ngày.',
-      action: 'meal-plan',
-      actionLabel: 'Mở trang thực đơn',
-    };
-  }
-
-  if (
-    q.includes('tủ lạnh') ||
-    q.includes('nguyên liệu có sẵn') ||
-    q.includes('trong kho') ||
-    q.includes('còn gì')
-  ) {
-    return {
-      content:
-        '🥦 Để chọn món từ nguyên liệu hiện có, bạn hãy kiểm tra Kho thực phẩm.\n\n' +
-        'Một số cách kết hợp phổ biến:\n' +
-        '• Trứng + cà rốt → Trứng cuộn rau củ\n' +
-        '• Ức gà + tỏi → Gà áp chảo\n' +
-        '• Cơm + trứng → Cơm chiên trứng\n\n' +
-        'Hiện tại mình chưa tự đọc dữ liệu Kho thực phẩm, nên đây là gợi ý tham khảo.',
-      action: 'pantry',
-      actionLabel: 'Xem kho thực phẩm',
-    };
-  }
-
-  if (
-    q.includes('mua sắm') ||
-    q.includes('đi chợ') ||
-    q.includes('cần mua') ||
-    q.includes('thiếu nguyên liệu')
-  ) {
-    return {
-      content:
-        '🛒 Mình có thể hỗ trợ bạn chuẩn bị danh sách mua sắm.\n\n' +
-        'Bạn nên kiểm tra:\n' +
-        '• Nguyên liệu đang thiếu\n' +
-        '• Số lượng cần cho từng món\n' +
-        '• Nguyên liệu đã có trong kho\n\n' +
-        'Hãy mở Danh sách mua sắm để thêm và đánh dấu các món đã mua.',
-      action: 'shopping-list',
-      actionLabel: 'Mở danh sách mua sắm',
-    };
-  }
-
-  if (
-    q.includes('nấu món') ||
-    q.includes('món gì') ||
-    q.includes('gợi ý món') ||
-    q.includes('ăn gì') ||
-    q.includes('công thức')
-  ) {
-    return {
-      content:
-        '🍳 Một vài món dễ làm mình gợi ý:\n\n' +
-        '1. Trứng cuộn rau củ – khoảng 10 phút\n' +
-        '2. Cơm chiên trứng – khoảng 15 phút\n' +
-        '3. Ức gà áp chảo – khoảng 25 phút\n' +
-        '4. Salad rau củ – khoảng 12 phút\n\n' +
-        'Bạn có thể xem công thức và chọn món phù hợp trong trang Gợi ý món ăn.',
-      action: 'recipes',
-      actionLabel: 'Xem công thức món ăn',
-    };
-  }
-
-  if (
-    q.includes('hướng dẫn') ||
-    q.includes('từng bước') ||
-    q.includes('chế biến') ||
-    q.includes('cách làm')
-  ) {
-    return {
-      content:
-        '👨‍🍳 Mình sẽ giúp bạn nấu ăn từng bước!\n\n' +
-        'Bạn hãy chọn một công thức trong trang Gợi ý món ăn, sau đó nhấn "Bắt đầu nấu ăn" ở trang Chi tiết công thức.\n\n' +
-        'Bạn có thể theo dõi và đánh dấu các bước đã hoàn thành.',
-      action: 'recipes',
-      actionLabel: 'Chọn món để nấu',
-    };
-  }
-
-  if (
-    q.includes('calo') ||
-    q.includes('dinh dưỡng') ||
-    q.includes('giảm cân') ||
-    q.includes('healthy')
-  ) {
-    return {
-      content:
-        '🥗 Để xây dựng bữa ăn cân đối, bạn có thể kết hợp:\n\n' +
-        '• Chất đạm: thịt, cá, trứng hoặc đậu\n' +
-        '• Rau củ và trái cây\n' +
-        '• Tinh bột phù hợp\n' +
-        '• Chất béo lành mạnh\n\n' +
-        'Nhu cầu dinh dưỡng thay đổi theo từng người. Thông tin calo trong công thức hiện chỉ là ước tính minh họa.',
-      action: 'recipes',
-      actionLabel: 'Xem các món ăn',
-    };
-  }
-
-  return {
-    content:
-      'Mình có thể giúp bạn với những việc sau:\n\n' +
-      '🍳 Gợi ý món ăn và công thức\n' +
-      '📅 Lập thực đơn theo ngày\n' +
-      '🥦 Tư vấn sử dụng nguyên liệu\n' +
-      '🛒 Chuẩn bị danh sách mua sắm\n' +
-      '👨‍🍳 Hướng dẫn nấu ăn\n\n' +
-      'Bạn hãy thử hỏi: "Hôm nay nấu món gì?" hoặc "Lập thực đơn 7 ngày cho 2 người".',
-  };
-}
 
 export default function FloatingAIAssistant() {
   const router = useRouter();
@@ -240,7 +125,7 @@ export default function FloatingAIAssistant() {
   ]);
   const [loading, setLoading] = useState(false);
 
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
 
   useEffect(() => {
     if (visible) {
@@ -252,35 +137,85 @@ export default function FloatingAIAssistant() {
     }
   }, [messages, visible]);
 
-  const sendMessage = (value?: string) => {
+  const sendLock=useRef(false);
+  const messageCounter=useRef(0);
+  const sendMessage = async (value?: string) => {
     const question = (value ?? input).trim();
 
-    if (!question || loading) return;
+    if (!question || sendLock.current) return;
+    sendLock.current=true;
 
     Keyboard.dismiss();
     setInput('');
 
     const userMessage: ChatMessage = {
-      id: `user-${Date.now()}`,
+      id: `user-${++messageCounter.current}`,
       role: 'user',
       content: question,
     };
 
-    const response = getLocalResponse(question);
+    const history = messages
+      .filter((item) => item.id !== 'welcome'&&!item.id.startsWith('assistant-error-'))
+      .slice(-12)
+      .map(({ role, content }) => ({ role, content }));
 
-    const assistantMessage: ChatMessage = {
-      id: `assistant-${Date.now()}`,
-      role: 'assistant',
-      content: response.content,
-      action: response.action,
-      actionLabel: response.actionLabel,
-    };
+    setMessages((previous) => [...previous, userMessage]);
+    setLoading(true);
+    const chatController=new AbortController();
+    const chatTimeout=setTimeout(()=>chatController.abort(),60000);
+    try {
+      const userId = await getCurrentUserId();
+      const user=await getAuthUser();
+      const token = user?.token || user?.sessionToken;
+      if (!token) throw new Error('Bạn cần đăng nhập trước khi trò chuyện với AI.');
+      const response = await fetch(`${API_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',Authorization:`Bearer ${token}` },
+        signal:chatController.signal,
+        body: JSON.stringify({ message: question, history, userId }),
+      });
+      const result = await response.json().catch(() => null);
 
-    setMessages((previous) => [
-      ...previous,
-      userMessage,
-      assistantMessage,
-    ]);
+      if (!response.ok || !result?.success || typeof result.reply !== 'string') {
+        // GHI CHÚ: Hiển thị detail của backend ở chế độ phát triển để phân biệt lỗi DB, API key và model.
+        const detail = typeof result?.detail === 'string' ? ` Chi tiết: ${result.detail}` : '';
+        const errorText = `${result?.message || ''} ${detail}`;
+        if (/503|UNAVAILABLE|currently experiencing high demand/i.test(errorText)) {
+          throw new Error('Gemini đang quá tải tạm thời. Backend đã thử model dự phòng nhưng chưa nhận được phản hồi; bạn hãy thử gửi lại sau ít phút.');
+        }
+        if (/403|PERMISSION_DENIED|free tier is not available|billing/i.test(errorText)) {
+          throw new Error('Gemini từ chối API key (403). Project đang dùng key chưa bật billing hoặc chưa được cấp quyền dùng Gemini API. Hãy bật billing cho đúng project trong Google AI Studio/Google Cloud, rồi khởi động lại backend.');
+        }
+        throw new Error(`${result?.message || `Backend trả về lỗi HTTP ${response.status}.`}${detail}`);
+      }
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          id: `assistant-${++messageCounter.current}`,
+          role: 'assistant',
+          content: result.reply,
+          ...(result.action === 'meal-plan' && {
+            action: 'meal-plan' as const,
+            actionLabel: typeof result.actionLabel === 'string' ? result.actionLabel : 'Mở Thực đơn',
+          }),
+        },
+      ]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Lỗi không xác định.';
+      setMessages((previous) => [
+        ...previous,
+        {
+          id: `assistant-error-${++messageCounter.current}`,
+          role: 'assistant',
+          content: `Mình chưa nhận được phản hồi từ Gemini. ${detail}`,
+        },
+      ]);
+    } finally {
+      clearTimeout(chatTimeout);
+      sendLock.current=false;
+      setLoading(false);
+    }
   };
 
   const navigateTo = (action: ActionType) => {
@@ -384,6 +319,9 @@ export default function FloatingAIAssistant() {
             >
               {messages.map((message) => {
                 const isUser = message.role === 'user';
+                const inventory = isUser
+                  ? null
+                  : parseIngredientInventory(message.content);
 
                 return (
                   <View
@@ -409,14 +347,40 @@ export default function FloatingAIAssistant() {
                           : styles.assistantBubble,
                       ]}
                     >
-                      <Text
-                        style={[
-                          styles.messageText,
-                          isUser && styles.userText,
-                        ]}
-                      >
-                        {message.content}
-                      </Text>
+                      {inventory ? (
+                        <>
+                          <Text style={styles.messageText}>{inventory.before}</Text>
+                          <View style={styles.ingredientList}>
+                            {inventory.ingredients.map((ingredient, index) => (
+                              <View
+                                key={`${ingredient}-${index}`}
+                                style={styles.ingredientRow}
+                              >
+                                <Text style={styles.ingredientIcon}>
+                                  {ingredientEmoji(ingredient)}
+                                </Text>
+                                <Text style={styles.ingredientName}>
+                                  {ingredient}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                          {!!inventory.after.trim() && (
+                            <Text style={styles.messageText}>
+                              {inventory.after.trim()}
+                            </Text>
+                          )}
+                        </>
+                      ) : (
+                        <Text
+                          style={[
+                            styles.messageText,
+                            isUser && styles.userText,
+                          ]}
+                        >
+                          {message.content}
+                        </Text>
+                      )}
 
                       {message.action && (
                         <Pressable
@@ -518,7 +482,7 @@ export default function FloatingAIAssistant() {
             </View>
 
             <Text style={styles.disclaimer}>
-              Gợi ý hiện là dữ liệu mẫu, chưa kết nối AI trực tuyến.
+              Câu trả lời do AI tạo; vui lòng kiểm tra dị ứng và thông tin trước khi nấu.
             </Text>
           </View>
         </KeyboardAvoidingView>
@@ -656,6 +620,26 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 4,
   },
   messageText: {
+    fontSize: 12,
+    lineHeight: 19,
+    color: C.dark,
+  },
+  ingredientList: {
+    marginTop: 7,
+    marginBottom: 4,
+    gap: 7,
+  },
+  ingredientRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  ingredientIcon: {
+    width: 22,
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  ingredientName: {
     fontSize: 12,
     lineHeight: 19,
     color: C.dark,

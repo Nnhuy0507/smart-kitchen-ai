@@ -1,3 +1,4 @@
+// Trang: Đăng ký tài khoản mới.
 import React, { useState } from "react";
 import AppHeader from "../components/AppHeader";
 import {
@@ -12,11 +13,11 @@ import {
   Platform,
 } from "react-native";
 import { useRouter } from "expo-router";
-import { registerWithApi } from "../lib/api";
+import { loginWithGoogleApi, registerWithApi } from "../lib/api";
+import { saveAuthUser } from "../lib/auth";
+import GoogleLoginButton from "../components/GoogleLoginButton";
 import {
   ArrowLeft,
-  ChefHat,
-  CircleHelp,
   Eye,
   EyeOff,
   LockKeyhole,
@@ -25,6 +26,7 @@ import {
   CheckCircle2,
   Sparkles,
 } from "lucide-react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const C = {
   orange: "#A23A00",
@@ -54,6 +56,23 @@ export default function RegisterScreen() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [agree, setAgree] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [googleError, setGoogleError] = useState("");
+
+  const submitGoogleRegistration = async (idToken: string) => {
+    if (isSubmitting) return;
+    setGoogleError("");
+    setIsSubmitting(true);
+    try {
+      const { isNewAccount, ...user } = await loginWithGoogleApi(idToken);
+      await saveAuthUser(user);
+      router.replace(isNewAccount ? "/onboarding-preferences" : "/home");
+    } catch (error) {
+      setGoogleError(error instanceof Error ? error.message : "Không thể đăng ký với Google.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const strong =
     password.length >= 8 &&
@@ -101,18 +120,45 @@ export default function RegisterScreen() {
   const submitRegistration = async () => {
     if (isSubmitting) return;
     const normalizedPhone = phone.replace(/\s/g, "");
-    if (!/^(0[35789]\d{8}|[35789]\d{8})$/.test(normalizedPhone) || name.trim().length < 2 || !strong || password !== confirm || !agree) {
+    if (
+      !/^(0[35789]\d{8}|[35789]\d{8})$/.test(normalizedPhone) ||
+      name.trim().length < 2 ||
+      !strong ||
+      password !== confirm ||
+      !agree
+    ) {
       validateRegistration();
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await registerWithApi({
+      const result = await registerWithApi({
         full_name: name.trim(),
-        phone: normalizedPhone.startsWith("0") ? normalizedPhone : `0${normalizedPhone}`,
+        phone: normalizedPhone.startsWith("0")
+          ? normalizedPhone
+          : `0${normalizedPhone}`,
         password,
       });
+
+      const user = (
+        result as {
+          data?: {
+            user_id: number;
+            full_name: string;
+            phone: string;
+          };
+        }
+      ).data;
+
+      if (!user?.user_id) {
+        throw new Error(
+          "Đã tạo tài khoản nhưng backend chưa trả về user_id. " +
+            "Cần kiểm tra API đăng ký.",
+        );
+      }
+
+      await AsyncStorage.setItem("authUser", JSON.stringify(user));
 
       setPhone("");
       setName("");
@@ -122,9 +168,20 @@ export default function RegisterScreen() {
       setShowPassword(false);
       setShowConfirm(false);
 
-      Alert.alert("Thành công", "Tài khoản đã được tạo.", [
-        { text: "Đăng nhập", onPress: () => router.replace("/login") },
-      ]);
+      if (Platform.OS === "web") {
+        router.replace("/onboarding-preferences");
+      } else {
+        Alert.alert(
+          "Đăng ký thành công",
+          "Hãy thiết lập khẩu vị cá nhân để Smart Kitchen AI gợi ý món ăn phù hợp.",
+          [
+            {
+              text: "Thiết lập ngay",
+              onPress: () => router.replace("/onboarding-preferences"),
+            },
+          ],
+        );
+      }
     } catch (error) {
       Alert.alert(
         "Không thể đăng ký",
@@ -164,18 +221,8 @@ export default function RegisterScreen() {
           50.000đ
         </Text>
 
-        <Pressable
-          style={s.google}
-          onPress={() =>
-            Alert.alert(
-              "Google",
-              "Chức năng đăng ký Google sẽ được kết nối sau.",
-            )
-          }
-        >
-          <Text style={s.googleLogo}>G</Text>
-          <Text style={s.googleText}>Đăng ký nhanh với Google</Text>
-        </Pressable>
+        <GoogleLoginButton variant="signup" disabled={isSubmitting} onCredential={submitGoogleRegistration} />
+        {!!googleError && <Text accessibilityRole="alert" style={s.googleError}>{googleError}</Text>}
 
         <View style={s.dividerRow}>
           <View style={s.divider} />
@@ -279,8 +326,14 @@ export default function RegisterScreen() {
           </Text>
         </Pressable>
 
-        <Pressable style={s.primary} onPress={submitRegistration} disabled={isSubmitting}>
-          <Text style={s.primaryText}>{isSubmitting ? "Đang tạo tài khoản..." : "Tạo tài khoản"}</Text>
+        <Pressable
+          style={s.primary}
+          onPress={submitRegistration}
+          disabled={isSubmitting}
+        >
+          <Text style={s.primaryText}>
+            {isSubmitting ? "Đang tạo tài khoản..." : "Tạo tài khoản"}
+          </Text>
         </Pressable>
 
         <View style={s.bottom}>
@@ -333,24 +386,7 @@ const s = StyleSheet.create({
     color: C.muted,
     marginTop: 9,
   },
-  google: {
-    height: 52,
-    backgroundColor: C.white,
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 13,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 12,
-    marginTop: 24,
-  },
-  googleLogo: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#4285F4",
-  },
-  googleText: { fontSize: 14, fontWeight: "700", color: C.dark },
+  googleError: { color: "#A12622", marginTop: 8 },
   dividerRow: {
     flexDirection: "row",
     alignItems: "center",

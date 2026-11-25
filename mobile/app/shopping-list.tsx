@@ -1,4 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import RequireLogin from "../components/RequireLogin";
+// Trang: Danh sách mua sắm — thêm, đánh dấu đã mua và chuyển vào kho.
+import { matchesSearch } from "../lib/search";
+import SearchField from "../components/SearchField";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -12,24 +16,27 @@ import {
   Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { kitchenRequest } from "../lib/kitchenApi";
 import {
   ArrowLeft,
   Plus,
-  Search,
   ShoppingCart,
   Check,
   Trash2,
   X,
   PackageCheck,
   ChevronRight,
-  Sparkles,
   Leaf,
+  BadgeCheck,
+  CircleCheck,
+  CalendarDays,
+  Clock3,
 } from "lucide-react-native";
 
 import AppHeader from "../components/AppHeader";
 import BottomNav from "../components/BottomNav";
+import FoodImage from "../components/FoodImage";
 
 const C = {
   orange: "#A23A00",
@@ -43,7 +50,6 @@ const C = {
   greenLight: "#E9F5EB",
 };
 
-const STORAGE_KEY = "smart-kitchen-shopping-list-v1";
 
 type Category =
   | "Rau củ & Gia vị"
@@ -58,6 +64,7 @@ type ShoppingItem = {
   category: Category;
   reason: string;
   checked: boolean;
+  image?: string;
 };
 
 type Filter = "all" | "pending" | "done";
@@ -69,6 +76,26 @@ const CATEGORIES: Category[] = [
   "Khác",
 ];
 
+function normalizeShoppingCategory(value: unknown): Category {
+  const normalized = String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (/rau|vegetable|herb|spice|gia vi|trai cay|fruit/.test(normalized)) return "Rau củ & Gia vị";
+  if (/thit|meat|poultry|hai san|seafood|fish/.test(normalized)) return "Thịt & Hải sản";
+  if (/sua|dairy|milk|cheese/.test(normalized)) return "Sữa & Chế phẩm";
+  return "Khác";
+}
+
+function parseMealPlanContexts(reason: string) {
+  const prefix = "Thiếu cho thực đơn đã lưu: ";
+  if (!reason.startsWith(prefix)) return [];
+  return reason.slice(prefix.length).split("; ").map((entry) => {
+    const [recipe, date, meal] = entry.split(" · ");
+    return { recipe, date, meal };
+  }).filter((context) => Boolean(context.recipe && context.date && context.meal));
+}
+
 const EMOJI: Record<Category, string> = {
   "Rau củ & Gia vị": "🥬",
   "Thịt & Hải sản": "🥩",
@@ -76,122 +103,64 @@ const EMOJI: Record<Category, string> = {
   Khác: "🛍️",
 };
 
-const INITIAL_ITEMS: ShoppingItem[] = [
-  {
-    id: "1",
-    name: "Súp lơ baby",
-    quantity: "300g",
-    category: "Rau củ & Gia vị",
-    reason: "Cho món bò cuộn súp lơ",
-    checked: false,
-  },
-  {
-    id: "2",
-    name: "Tỏi",
-    quantity: "2 củ",
-    category: "Rau củ & Gia vị",
-    reason: "Gia vị chế biến",
-    checked: false,
-  },
-  {
-    id: "3",
-    name: "Cà rốt",
-    quantity: "500g",
-    category: "Rau củ & Gia vị",
-    reason: "Bổ sung rau củ",
-    checked: true,
-  },
-  {
-    id: "4",
-    name: "Phô mai Mozzarella",
-    quantity: "200g",
-    category: "Sữa & Chế phẩm",
-    reason: "Cho món đút lò",
-    checked: false,
-  },
-  {
-    id: "5",
-    name: "Sữa tươi",
-    quantity: "1 lít",
-    category: "Sữa & Chế phẩm",
-    reason: "Dùng cho bữa sáng",
-    checked: true,
-  },
-  {
-    id: "6",
-    name: "Kem tươi",
-    quantity: "200ml",
-    category: "Sữa & Chế phẩm",
-    reason: "Cho món súp bí đỏ",
-    checked: false,
-  },
-];
-
-export default function ShoppingListScreen() {
+function ShoppingListScreen() {
   const router = useRouter();
+  const { source } = useLocalSearchParams<{ source?: string }>();
+  const aiOnly = source === "ai-plan";
 
   const [items, setItems] = useState<ShoppingItem[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [categoryFilter, setCategoryFilter] = useState<Category | "all">("all");
 
   const [modalVisible, setModalVisible] = useState(false);
+  const [detailItem, setDetailItem] = useState<ShoppingItem | null>(null);
   const [newName, setNewName] = useState("");
   const [newQuantity, setNewQuantity] = useState("");
   const [newCategory, setNewCategory] = useState<Category>("Rau củ & Gia vị");
 
-  useEffect(() => {
-    async function loadItems() {
-      try {
-        const saved = await AsyncStorage.getItem(STORAGE_KEY);
-
-        if (saved !== null) {
-          const parsed = JSON.parse(saved);
-          setItems(Array.isArray(parsed) ? parsed : INITIAL_ITEMS);
-        } else {
-          setItems(INITIAL_ITEMS);
-        }
-      } catch {
-        setItems(INITIAL_ITEMS);
-      } finally {
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    setLoaded(false);
+    setItems([]);
+    kitchenRequest<ShoppingItem[]>(aiOnly ? "shopping?source=ai-plan" : "shopping").then(data => {
+      if (active) {
+        setItems(data.map(item => ({ ...item, category: normalizeShoppingCategory(item.category) })));
         setLoaded(true);
       }
-    }
-
-    loadItems();
-  }, []);
-
-  useEffect(() => {
-    if (!loaded) return;
-
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(items)).catch(() => {
-      console.warn("Không thể lưu danh sách mua sắm");
-    });
-  }, [items, loaded]);
+    }).catch(error => Alert.alert("Không thể tải danh sách", error.message));
+    return () => { active = false; };
+  }, [aiOnly]));
+  const [saving, setSaving] = useState(false);
+  const mutate = async (task: () => Promise<void>) => {
+    if (!loaded || saving) return;
+    setSaving(true);
+    try { await task(); } catch (error) {
+      Alert.alert("Không thể lưu", error instanceof Error ? error.message : "Vui lòng thử lại");
+    } finally { setSaving(false); }
+  };
 
   const total = items.length;
   const completed = items.filter((i) => i.checked).length;
   const pending = total - completed;
 
   const progress = total > 0 ? (completed / total) * 100 : 0;
+  const detailContexts = detailItem ? parseMealPlanContexts(detailItem.reason) : [];
 
   const filteredItems = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
-
     return items.filter((item) => {
-      const matchesSearch =
-        item.name.toLowerCase().includes(keyword) ||
-        item.reason.toLowerCase().includes(keyword);
-
+      const matchesQuery = matchesSearch(search, item.name, item.category, item.reason);
       const matchesFilter =
         filter === "all" ||
         (filter === "pending" && !item.checked) ||
         (filter === "done" && item.checked);
+      const matchesCategory = categoryFilter === "all" || item.category === categoryFilter;
 
-      return matchesSearch && matchesFilter;
+      return matchesQuery && matchesFilter && matchesCategory;
     });
-  }, [items, search, filter]);
+  }, [items, search, filter, categoryFilter]);
 
   const goBack = () => {
     if (router.canGoBack()) {
@@ -201,12 +170,35 @@ export default function ShoppingListScreen() {
     }
   };
 
-  const toggleItem = (id: string) => {
-    setItems((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, checked: !item.checked } : item,
-      ),
-    );
+  const toggleItem = (id: string) => void mutate(async () => {
+    const item = items.find(i => i.id === id);
+    if (!item) return;
+    await kitchenRequest(`shopping/${id}`, "PATCH", { checked: !item.checked });
+    setItems(prev => prev.map(i => i.id === id ? { ...i, checked: !i.checked } : i));
+  });
+
+  const removePurchased = () => {
+    const purchased = items.filter((item) => item.checked);
+    if (!purchased.length) return;
+    Alert.alert("Xóa món đã mua", `Xóa ${purchased.length} nguyên liệu đã mua khỏi danh sách?`, [
+      { text: "Hủy", style: "cancel" },
+      { text: "Xóa", style: "destructive", onPress: () => void mutate(async () => {
+        await Promise.all(purchased.map((item) => kitchenRequest(`shopping/${item.id}`, "DELETE")));
+        setItems((current) => current.filter((item) => !item.checked));
+      }) },
+    ]);
+  };
+
+  const completeList = () => {
+    const pendingItems = items.filter((item) => !item.checked);
+    if (!pendingItems.length) return;
+    Alert.alert("Hoàn tất danh sách", `Đánh dấu đã mua tất cả ${pendingItems.length} nguyên liệu còn lại?`, [
+      { text: "Để sau", style: "cancel" },
+      { text: "Hoàn tất", onPress: () => void mutate(async () => {
+        await Promise.all(pendingItems.map((item) => kitchenRequest(`shopping/${item.id}`, "PATCH", { checked: true })));
+        setItems((current) => current.map((item) => ({ ...item, checked: true })));
+      }) },
+    ]);
   };
 
   const removeItem = (item: ShoppingItem) => {
@@ -219,7 +211,10 @@ export default function ShoppingListScreen() {
           text: "Xóa",
           style: "destructive",
           onPress: () => {
-            setItems((prev) => prev.filter((i) => i.id !== item.id));
+            void mutate(async () => {
+              await kitchenRequest(`shopping/${item.id}`, "DELETE");
+              setItems(prev => prev.filter(i => i.id !== item.id));
+            });
           },
         },
       ],
@@ -247,12 +242,12 @@ export default function ShoppingListScreen() {
       checked: false,
     };
 
-    setItems((prev) => [...prev, newItem]);
-
-    setNewName("");
-    setNewQuantity("");
-    setNewCategory("Rau củ & Gia vị");
-    setModalVisible(false);
+    void mutate(async () => {
+      const saved = await kitchenRequest<ShoppingItem>("shopping", "POST", newItem);
+      setItems(prev => [...prev, saved]);
+      setNewName(""); setNewQuantity(""); setNewCategory("Rau củ & Gia vị");
+      setModalVisible(false);
+    });
   };
 
   const transferToPantry = () => {
@@ -266,18 +261,14 @@ export default function ShoppingListScreen() {
       return;
     }
 
-    Alert.alert(
-      "Nguyên liệu đã mua",
-      `Bạn đã mua ${purchased.length} nguyên liệu.\n\n` +
-        "Chức năng tự động chuyển dữ liệu vào kho chưa được kết nối. Bạn có thể mở Kho thực phẩm để thêm nguyên liệu.",
-      [
-        { text: "Đóng", style: "cancel" },
-        {
-          text: "Mở Kho thực phẩm",
-          onPress: () => router.push("/pantry" as any),
-        },
-      ],
-    );
+    Alert.alert("Chuyển vào kho", "Nguyên liệu sẽ được chuyển vào ngăn mát. Hãy cập nhật hạn sử dụng tại kho.", [
+      { text: "Hủy", style: "cancel" },
+      { text: "Chuyển", onPress: () => void mutate(async () => {
+        await kitchenRequest("shopping/transfer", "POST", aiOnly ? { source: "ai-plan" } : undefined);
+        setItems(prev => prev.filter(i => !i.checked));
+        router.push("/pantry" as any);
+      }) },
+    ]);
   };
 
   const renderItem = (item: ShoppingItem) => (
@@ -289,11 +280,15 @@ export default function ShoppingListScreen() {
         {item.checked && <Check size={16} color={C.white} />}
       </Pressable>
 
-      <View style={styles.itemEmojiBox}>
-        <Text style={styles.itemEmoji}>{EMOJI[item.category]}</Text>
-      </View>
+      {item.image ? (
+        <FoodImage uri={item.image} resizeMode="cover" style={styles.itemImage} accessibilityLabel={`Ảnh ${item.name}`} />
+      ) : (
+        <View style={styles.itemEmojiBox}>
+          <Text style={styles.itemEmoji}>{EMOJI[item.category] || "🛍️"}</Text>
+        </View>
+      )}
 
-      <Pressable style={styles.itemInfo} onPress={() => toggleItem(item.id)}>
+      <Pressable style={styles.itemInfo} onPress={() => setDetailItem(item)} accessibilityRole="button" accessibilityLabel={`Xem chi tiết ${item.name}`}>
         <Text
           style={[styles.itemName, item.checked && styles.completedText]}
           numberOfLines={1}
@@ -330,7 +325,7 @@ export default function ShoppingListScreen() {
         </Pressable>
 
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Danh sách mua sắm</Text>
+          <Text style={styles.headerTitle}>{aiOnly ? "Cần mua cho thực đơn AI" : "Danh sách mua sắm"}</Text>
           <Text style={styles.headerSubtitle}>
             Mua đủ nguyên liệu, nấu ngon mỗi ngày
           </Text>
@@ -346,31 +341,29 @@ export default function ShoppingListScreen() {
       >
         <Text style={styles.eyebrow}>KẾ HOẠCH ĐI CHỢ</Text>
 
-        <Text style={styles.pageTitle}>Mua sắm thông minh</Text>
+        <Text style={styles.pageTitle}>{aiOnly ? "Nguyên liệu cần mua" : "Mua sắm thông minh"}</Text>
 
         <View style={styles.introRow}>
-          <Text style={styles.introSubtitle}>Theo dõi những món cần mua</Text>
+          <Text style={styles.introSubtitle}>{aiOnly ? "Từ bảng thực đơn AI mới nhất" : "Theo dõi những món cần mua"}</Text>
 
-          <Pressable
+          {!aiOnly && (<Pressable
             style={styles.addButton}
             onPress={() => setModalVisible(true)}
           >
             <Plus size={15} color={C.white} />
             <Text style={styles.addButtonText}>Thêm nguyên liệu</Text>
-          </Pressable>
+          </Pressable>)}
         </View>
 
         {/* TIẾN ĐỘ */}
         <View style={styles.progressCard}>
           <View style={styles.progressHeader}>
             <View style={styles.inline}>
-              <ShoppingCart size={19} color={C.orange} />
+              <BadgeCheck size={20} color={C.green} fill={C.greenLight} />
               <Text style={styles.progressTitle}>Tiến độ mua sắm</Text>
             </View>
 
-            <Text style={styles.progressCount}>
-              {completed}/{total} món
-            </Text>
+            <Text style={styles.progressPercent}>{progress.toFixed(1)}%</Text>
           </View>
 
           <View style={styles.progressTrack}>
@@ -378,36 +371,42 @@ export default function ShoppingListScreen() {
           </View>
 
           <Text style={styles.progressDescription}>
-            Đã mua {completed} món · Còn {pending} món cần mua
+            Đã hoàn thành <Text style={styles.progressEmphasis}>{completed}/{total} món</Text> ({progress.toFixed(1)}%)
           </Text>
 
-          <View style={styles.progressTip}>
-            <Sparkles size={14} color={C.green} />
-            <Text style={styles.progressTipText}>
-              {pending === 0
-                ? "Tuyệt vời! Bạn đã hoàn thành danh sách."
-                : "Chuẩn bị đủ nguyên liệu để nấu món ngon!"}
-            </Text>
+          <View style={styles.progressDivider} />
+
+          <View style={styles.progressStats}>
+            <View style={styles.progressStat}>
+              <Text style={styles.progressStatLabel}>Tổng số</Text>
+              <Text style={styles.progressStatValue}>{total}</Text>
+            </View>
+            <View style={[styles.progressStat, styles.progressStatDone]}>
+              <Text style={[styles.progressStatLabel, { color: C.green }]}>Đã mua</Text>
+              <Text style={[styles.progressStatValue, { color: C.green }]}>{completed}</Text>
+            </View>
+            <View style={[styles.progressStat, styles.progressStatPending]}>
+              <Text style={[styles.progressStatLabel, { color: C.orange }]}>Chưa mua</Text>
+              <Text style={[styles.progressStatValue, { color: C.orange }]}>{pending}</Text>
+            </View>
+            <View style={styles.progressStat}>
+              <Text style={styles.progressStatLabel}>Tiến độ</Text>
+              <Text style={[styles.progressStatValue, { color: C.green }]}>{Math.round(progress)}%</Text>
+            </View>
+          </View>
+
+          <View style={styles.progressActions}>
+            <Pressable disabled={!completed || saving} onPress={removePurchased} style={[styles.progressAction, styles.removePurchasedButton, (!completed || saving) && styles.progressActionDisabled]}>
+              <Trash2 size={14} color={C.muted} /><Text style={styles.removePurchasedText}>Xóa món đã mua</Text>
+            </Pressable>
+            <Pressable disabled={!pending || saving} onPress={completeList} style={[styles.progressAction, styles.completeListButton, (!pending || saving) && styles.progressActionDisabled]}>
+              <CircleCheck size={15} color={C.green} /><Text style={styles.completeListText}>Hoàn tất danh sách</Text>
+            </Pressable>
           </View>
         </View>
 
         {/* TÌM KIẾM */}
-        <View style={styles.searchBox}>
-          <Search size={18} color={C.muted} />
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Tìm nguyên liệu trong danh sách..."
-            placeholderTextColor="#A18B81"
-            value={search}
-            onChangeText={setSearch}
-          />
-
-          {search.length > 0 && (
-            <Pressable onPress={() => setSearch("")}>
-              <X size={17} color={C.muted} />
-            </Pressable>
-          )}
-        </View>
+        <SearchField value={search} onChangeText={setSearch} placeholder="Tìm nguyên liệu trong danh sách..." style={styles.searchBox} inputStyle={styles.searchInput} />
 
         {/* BỘ LỌC */}
         <View style={styles.filterRow}>
@@ -441,6 +440,15 @@ export default function ShoppingListScreen() {
           })}
         </View>
 
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.categoryFilterRow}>
+          {[{ key: "all" as const, label: "Mọi danh mục", count: items.length }, ...CATEGORIES.map((category) => ({ key: category, label: category, count: items.filter((item) => item.category === category).length }))].map((option) => {
+            const active = categoryFilter === option.key;
+            return <Pressable key={option.key} onPress={() => setCategoryFilter(option.key)} style={[styles.categoryFilterChip, active && styles.categoryFilterChipActive]}>
+              <Text numberOfLines={1} style={[styles.categoryFilterText, active && styles.categoryFilterTextActive]}>{option.label} ({option.count})</Text>
+            </Pressable>;
+          })}
+        </ScrollView>
+
         {/* DANH SÁCH THEO NHÓM */}
         {CATEGORIES.map((category) => {
           const categoryItems = filteredItems.filter(
@@ -473,16 +481,16 @@ export default function ShoppingListScreen() {
             <Text style={styles.emptyTitle}>Không có nguyên liệu</Text>
 
             <Text style={styles.emptyDescription}>
-              Hãy thêm nguyên liệu hoặc thay đổi bộ lọc.
+              {aiOnly ? "Thực đơn AI mới nhất chưa có mục cần mua hoặc bộ lọc không có kết quả." : "Hãy thêm nguyên liệu hoặc thay đổi bộ lọc."}
             </Text>
 
-            <Pressable
+            {!aiOnly && (<Pressable
               style={styles.emptyAddButton}
               onPress={() => setModalVisible(true)}
             >
               <Plus size={16} color={C.white} />
               <Text style={styles.emptyAddText}>Thêm nguyên liệu</Text>
-            </Pressable>
+            </Pressable>)}
           </View>
         )}
 
@@ -583,6 +591,56 @@ export default function ShoppingListScreen() {
             </Pressable>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={detailItem !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDetailItem(null)}
+      >
+        {detailItem && <View style={styles.modalOverlay}>
+          <View style={styles.detailCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Chi tiết nguyên liệu</Text>
+              <Pressable accessibilityLabel="Đóng chi tiết" onPress={() => setDetailItem(null)}><X size={21} color={C.muted} /></Pressable>
+            </View>
+            <ScrollView style={styles.detailScroll} contentContainerStyle={styles.detailScrollContent} showsVerticalScrollIndicator={false}>
+              <View style={styles.detailItemHeader}>
+                {detailItem.image ? <FoodImage uri={detailItem.image} resizeMode="cover" style={styles.detailImage} accessibilityLabel={`Ảnh ${detailItem.name}`} /> : <View style={[styles.detailImage, styles.itemEmojiBox]}><Text style={styles.detailEmoji}>{EMOJI[detailItem.category]}</Text></View>}
+                <View style={styles.detailTitleWrap}>
+                  <Text style={styles.detailName}>{detailItem.name}</Text>
+                  <Text style={styles.detailCategory}>{detailItem.category}</Text>
+                  <View style={styles.detailQuantityPill}><Text style={styles.detailQuantity}>{detailItem.quantity}</Text></View>
+                </View>
+              </View>
+              <View style={styles.detailSection}>
+                <View style={styles.detailSectionHeading}>
+                  <View style={styles.detailSectionIcon}><CalendarDays size={16} color={C.orange} /></View>
+                  <Text style={styles.detailLabel}>{detailContexts.length ? "Dùng trong thực đơn" : "Thông tin"}</Text>
+                  {detailContexts.length > 0 && <Text style={styles.detailCount}>{detailContexts.length} bữa</Text>}
+                </View>
+                {detailContexts.length ? detailContexts.map((context, index) => (
+                  <View key={`${context.date}-${context.meal}-${context.recipe}-${index}`} style={styles.detailContextCard}>
+                    <Text style={styles.detailRecipeName}>{context.recipe}</Text>
+                    <View style={styles.detailContextMeta}>
+                      <View style={styles.detailMetaPill}><CalendarDays size={12} color={C.muted} /><Text style={styles.detailMetaText}>{context.date}</Text></View>
+                      <View style={[styles.detailMetaPill, styles.detailMealPill]}><Clock3 size={12} color={C.green} /><Text style={[styles.detailMetaText, { color: C.green }]}>{context.meal}</Text></View>
+                    </View>
+                  </View>
+                )) : <Text style={styles.detailReason}>{detailItem.reason || "Nguyên liệu được thêm thủ công vào danh sách."}</Text>}
+              </View>
+              <View style={styles.detailStatusCard}>
+                <View style={[styles.detailStatusDot, { backgroundColor: detailItem.checked ? C.green : C.orange }]} />
+                <Text style={[styles.detailStatusText, { color: detailItem.checked ? C.green : C.orange }]}>{detailItem.checked ? "Đã mua" : "Chưa mua"}</Text>
+              </View>
+            </ScrollView>
+            <Pressable disabled={saving} onPress={() => { toggleItem(detailItem.id); setDetailItem(null); }} style={[styles.detailToggleButton, detailItem.checked && styles.detailToggleButtonUndo]}>
+              {detailItem.checked ? <X size={16} color={C.orange} /> : <Check size={16} color={C.white} />}
+              <Text style={[styles.detailToggleText, detailItem.checked && { color: C.orange }]}>{detailItem.checked ? "Đánh dấu chưa mua" : "Đánh dấu đã mua"}</Text>
+            </Pressable>
+          </View>
+        </View>}
       </Modal>
     </SafeAreaView>
   );
@@ -687,21 +745,21 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: C.dark,
   },
-  progressCount: {
+  progressPercent: {
     fontSize: 13,
     fontWeight: "800",
-    color: C.orange,
+    color: C.green,
   },
   progressTrack: {
     height: 9,
     borderRadius: 5,
-    backgroundColor: C.peach,
+    backgroundColor: "#E1E7EE",
     marginTop: 18,
     overflow: "hidden",
   },
   progressFill: {
     height: "100%",
-    backgroundColor: C.orange,
+    backgroundColor: C.green,
     borderRadius: 5,
   },
   progressDescription: {
@@ -709,17 +767,112 @@ const styles = StyleSheet.create({
     color: C.muted,
     marginTop: 11,
   },
-  progressTip: {
+  progressEmphasis: {
+    color: C.orange,
+    fontWeight: "800",
+  },
+  progressDivider: {
+    height: 1,
+    backgroundColor: C.border,
+    marginTop: 13,
+  },
+  progressStats: {
     flexDirection: "row",
-    alignItems: "center",
     gap: 7,
     marginTop: 13,
   },
-  progressTipText: {
+  progressStat: {
     flex: 1,
-    fontSize: 10,
-    color: C.green,
+    minWidth: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 9,
+    borderWidth: 1,
+    borderColor: "#F4DDD6",
+    borderRadius: 12,
+    backgroundColor: "#FFF9F7",
+  },
+  progressStatDone: {
+    borderColor: "#D2E8D9",
+    backgroundColor: "#F0F7F2",
+  },
+  progressStatPending: {
+    borderColor: "#FFD2C3",
+    backgroundColor: "#FFF4EF",
+  },
+  progressStatLabel: {
+    color: C.muted,
+    fontSize: 9,
     fontWeight: "700",
+    textAlign: "center",
+  },
+  progressStatValue: {
+    color: C.orange,
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 3,
+  },
+  progressActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 13,
+  },
+  progressAction: {
+    flex: 1,
+    minHeight: 39,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    paddingHorizontal: 6,
+    borderRadius: 12,
+  },
+  removePurchasedButton: {
+    backgroundColor: "#FFF9F7",
+    borderWidth: 1,
+    borderColor: "#F4DDD6",
+  },
+  completeListButton: {
+    backgroundColor: C.greenLight,
+  },
+  progressActionDisabled: {
+    opacity: 0.48,
+  },
+  removePurchasedText: {
+    color: C.muted,
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  completeListText: {
+    color: C.green,
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  categoryFilterRow: {
+    gap: 7,
+    paddingBottom: 3,
+    marginBottom: 17,
+  },
+  categoryFilterChip: {
+    maxWidth: 190,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.white,
+  },
+  categoryFilterChipActive: {
+    borderColor: C.green,
+    backgroundColor: C.greenLight,
+  },
+  categoryFilterText: {
+    color: C.muted,
+    fontSize: 9,
+    fontWeight: "700",
+  },
+  categoryFilterTextActive: {
+    color: C.green,
   },
   searchBox: {
     height: 45,
@@ -817,6 +970,12 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
+  },
+  itemImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: C.peach,
   },
   itemEmoji: {
     fontSize: 22,
@@ -939,6 +1098,175 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingBottom: 35,
   },
+  detailCard: {
+    maxHeight: "86%",
+    backgroundColor: C.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 18,
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+  },
+  detailScroll: {
+    flexShrink: 1,
+  },
+  detailScrollContent: {
+    paddingBottom: 12,
+  },
+  detailItemHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 16,
+    padding: 11,
+    borderRadius: 15,
+    backgroundColor: C.cream,
+  },
+  detailImage: {
+    width: 68,
+    height: 68,
+    borderRadius: 12,
+    backgroundColor: C.peach,
+  },
+  detailEmoji: {
+    fontSize: 32,
+  },
+  detailTitleWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  detailName: {
+    color: C.dark,
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  detailCategory: {
+    color: C.muted,
+    fontSize: 10,
+  },
+  detailQuantityPill: {
+    alignSelf: "flex-start",
+    marginTop: 2,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    backgroundColor: C.peach,
+  },
+  detailQuantity: {
+    color: C.orange,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  detailSection: {
+    padding: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 14,
+    backgroundColor: C.white,
+  },
+  detailSectionHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginBottom: 9,
+  },
+  detailSectionIcon: {
+    width: 27,
+    height: 27,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+    backgroundColor: C.peach,
+  },
+  detailLabel: {
+    color: C.dark,
+    flex: 1,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  detailCount: {
+    color: C.muted,
+    fontSize: 9,
+  },
+  detailContextCard: {
+    paddingVertical: 9,
+    borderTopWidth: 1,
+    borderTopColor: "#F3E9E3",
+  },
+  detailRecipeName: {
+    color: C.dark,
+    fontSize: 11,
+    fontWeight: "700",
+    lineHeight: 16,
+  },
+  detailContextMeta: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 6,
+  },
+  detailMetaPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: C.cream,
+  },
+  detailMealPill: {
+    backgroundColor: C.greenLight,
+  },
+  detailMetaText: {
+    color: C.muted,
+    fontSize: 9,
+    fontWeight: "600",
+  },
+  detailReason: {
+    color: C.muted,
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  detailStatusCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    alignSelf: "flex-start",
+    marginTop: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 9,
+    backgroundColor: C.cream,
+  },
+  detailStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  detailStatusText: {
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  detailToggleButton: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginTop: 9,
+    borderRadius: 12,
+    backgroundColor: C.green,
+  },
+  detailToggleButtonUndo: {
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.cream,
+  },
+  detailToggleText: {
+    color: C.white,
+    fontSize: 12,
+    fontWeight: "800",
+  },
   modalHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1002,3 +1330,6 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
 });
+
+// Người dùng khách cần đăng nhập trước khi truy cập chức năng cá nhân.
+export default function ProtectedPage() { return <RequireLogin><ShoppingListScreen/></RequireLogin>; }

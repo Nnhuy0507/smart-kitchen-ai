@@ -1,0 +1,62 @@
+const fs = require("node:fs");
+const path = require("node:path");
+const db = require("../src/config/db");
+(async () => {
+  await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261121_create_app_posts.sql"), "utf8"));
+  const [columns] = await db.query("SHOW COLUMNS FROM pantry_items LIKE 'note'");
+  if (!columns.length) await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261104_pantry_note.sql"), "utf8"));
+  const [calorieColumns] = await db.query("SHOW COLUMNS FROM recipes LIKE 'calories'");
+  if (!calorieColumns.length) await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261104_recipe_calories.sql"), "utf8"));
+  const sql = fs.readFileSync(path.join(__dirname, "../migrations/20261104_community.sql"), "utf8");
+  for (const statement of sql.split(";").filter(s => s.trim())) await db.query(statement);
+  const [visibilityColumns] = await db.query("SHOW COLUMNS FROM community_posts LIKE 'visibility'");
+  if (!visibilityColumns.length) await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261104_post_visibility.sql"), "utf8"));
+  const communitySql = fs.readFileSync(path.join(__dirname, "../migrations/20261105_community_comments_follows.sql"), "utf8");
+  for (const statement of communitySql.split(";").filter(s => s.trim())) await db.query(statement);
+  const [replyColumns] = await db.query("SHOW COLUMNS FROM community_comments LIKE 'parent_comment_id'");
+  if (!replyColumns.length) await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261105_comment_replies.sql"), "utf8"));
+  await require("./migrate-user-roles").ensureUserRoles();
+  await require("./migrate-post-moderation").ensurePostModeration();
+  await require("./migrate-user-management").ensureUserManagement();
+  const aiActivitySql = fs.readFileSync(path.join(__dirname, "../migrations/20261115_ai_activity_logs.sql"), "utf8");
+  for (const statement of aiActivitySql.split(";").filter(s => s.trim())) await db.query(statement);
+  const aiReviewSql = fs.readFileSync(path.join(__dirname, "../migrations/20261115_ai_content_moderation.sql"), "utf8");
+  for (const statement of aiReviewSql.split(";").filter(s => s.trim())) await db.query(statement);
+  const mealShoppingSql = fs.readFileSync(path.join(__dirname, "../migrations/20261115_meal_plan_shopping_sync.sql"), "utf8");
+  for (const statement of mealShoppingSql.split(";").filter(s => s.trim())) await db.query(statement);
+  const [shoppingSourceColumns] = await db.query("SHOW COLUMNS FROM shopping_list_items LIKE 'source_type'");
+  if (!shoppingSourceColumns.length) await db.query("ALTER TABLE shopping_list_items ADD COLUMN source_type ENUM('MANUAL','MEAL_PLAN') NOT NULL DEFAULT 'MANUAL'");
+  if (!shoppingSourceColumns.length || !shoppingSourceColumns[0].Type.includes("'AI_PLAN'")) {
+    await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261125_ai_plan_shopping_source.sql"), "utf8"));
+  }
+  const [reviewDecisionColumns] = await db.query("SHOW COLUMNS FROM ai_content_reviews LIKE 'decision_status'");
+  if (!reviewDecisionColumns[0].Type.includes("SAFE")) await db.query("ALTER TABLE ai_content_reviews MODIFY decision_status ENUM('PENDING','SAFE','APPROVED','HIDDEN','DISMISSED','REMOVED') NOT NULL DEFAULT 'PENDING'");
+  const [reviewHighlightsColumns] = await db.query("SHOW COLUMNS FROM ai_content_reviews LIKE 'highlights'");
+  if (!reviewHighlightsColumns.length) {
+    await db.query("ALTER TABLE ai_content_reviews ADD COLUMN highlights JSON NULL AFTER ai_flags");
+    await db.query("UPDATE ai_content_reviews SET highlights=JSON_ARRAY() WHERE highlights IS NULL");
+    await db.query("ALTER TABLE ai_content_reviews MODIFY highlights JSON NOT NULL");
+  }
+  await db.query("UPDATE ai_content_reviews SET decision_status='SAFE' WHERE analysis_status='ANALYZED' AND decision_status='PENDING' AND risk_score<30 AND JSON_LENGTH(ai_flags)=0");
+  const [commentModerationColumns] = await db.query("SHOW COLUMNS FROM community_comments LIKE 'moderation_status'");
+  if (!commentModerationColumns.length) await db.query("ALTER TABLE community_comments ADD COLUMN moderation_status ENUM('APPROVED','HIDDEN') NOT NULL DEFAULT 'APPROVED'");
+  const [aiActivityColumns] = await db.query("SHOW COLUMNS FROM ai_activity_logs LIKE 'activity_type'");
+  if (!aiActivityColumns[0].Type.includes("CONTENT_MODERATION")) await db.query("ALTER TABLE ai_activity_logs MODIFY activity_type ENUM('INGREDIENT_SCAN','RECIPE_SUGGESTION','MEAL_PLAN','CHAT','CONTENT_MODERATION') NOT NULL");
+  const [aiActivityUserColumn] = await db.query("SHOW COLUMNS FROM ai_activity_logs LIKE 'user_id'");
+  if (!aiActivityUserColumn.length) await db.query("ALTER TABLE ai_activity_logs ADD COLUMN user_id BIGINT NULL AFTER ai_activity_id");
+  const [aiActivityUserIndex] = await db.query("SHOW INDEX FROM ai_activity_logs WHERE Key_name='idx_ai_activity_user_created'");
+  if (!aiActivityUserIndex.length) await db.query("ALTER TABLE ai_activity_logs ADD INDEX idx_ai_activity_user_created (user_id,created_at)");
+  await db.query(`CREATE TABLE IF NOT EXISTS pantry_scan_batches (
+    user_id BIGINT NOT NULL,
+    request_id VARCHAR(80) NOT NULL,
+    payload_hash CHAR(64) NOT NULL,
+    result_json JSON NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(user_id,request_id),
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+  )`);
+  await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261125_password_resets.sql"), "utf8"));
+  const [pantryCategory] = await db.query("SHOW COLUMNS FROM pantry_items LIKE 'category_override'");
+  if (!pantryCategory.length) await db.query(fs.readFileSync(path.join(__dirname, "../migrations/20261125_pantry_category_override.sql"), "utf8"));
+  console.log("Đã cập nhật cấu trúc dữ liệu.");
+})().catch(error => { console.error(error.message); process.exitCode = 1; }).finally(() => db.end());

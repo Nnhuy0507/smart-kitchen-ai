@@ -1,3 +1,5 @@
+import { logoutUser, saveAuthUser } from "../lib/auth";
+// Trang: Đăng nhập tài khoản — giữ đầy đủ nội dung, căn chỉnh lại bố cục.
 import React, { useState } from "react";
 import AppHeader from "../components/AppHeader";
 import {
@@ -12,8 +14,9 @@ import {
   Platform,
 } from "react-native";
 import { useRouter } from "expo-router";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { loginWithApi } from "../lib/api";
+import { loginWithApi, loginWithGoogleApi } from "../lib/api";
+import PasswordResetDialog from "../components/PasswordResetDialog";
+import GoogleLoginButton from "../components/GoogleLoginButton";
 import {
   ArrowLeft,
   ChefHat,
@@ -40,6 +43,7 @@ export default function LoginScreen() {
   const router = useRouter();
 
   const [mode, setMode] = useState<"password" | "otp">("password");
+  const [resetOpen, setResetOpen] = useState(false);
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
@@ -52,6 +56,8 @@ export default function LoginScreen() {
     message: string;
   } | null>(null);
 
+  const identifier = phone.trim();
+  const emailLogin = mode === "password" && identifier.includes("@");
   const validPhone = () =>
     /^(0[35789]\d{8}|[35789]\d{8})$/.test(phone.replace(/\s/g, ""));
 
@@ -90,12 +96,28 @@ export default function LoginScreen() {
     );
   };
 
+  const submitGoogleLogin = async (idToken: string) => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setFeedback(null);
+    try {
+      const user = await loginWithGoogleApi(idToken);
+      await saveAuthUser(user, remember);
+      router.replace("/home");
+    } catch (error) {
+      setFeedback({ type: "error", message: error instanceof Error ? error.message : "Đăng nhập Google thất bại." });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const submitLogin = async () => {
     if (isSubmitting) return;
     setFeedback(null);
-    if (!validPhone()) {
-      setFeedback({ type: "error", message: "Vui lòng nhập số điện thoại hợp lệ." });
-      Alert.alert("Thông báo", "Vui lòng nhập số điện thoại hợp lệ.");
+    if (!(emailLogin ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier) : validPhone())) {
+      const message = mode === "otp" ? "Vui lòng nhập số điện thoại hợp lệ." : "Vui lòng nhập email hoặc số điện thoại hợp lệ.";
+      setFeedback({ type: "error", message });
+      Alert.alert("Thông báo", message);
       return;
     }
     if (mode === "otp") {
@@ -111,14 +133,10 @@ export default function LoginScreen() {
     setIsSubmitting(true);
     try {
       const user = await loginWithApi({
-        phone: phone.replace(/\s/g, "").replace(/^(?!0)/, "0"),
+        identifier: emailLogin ? identifier : identifier.replace(/\s/g, ""),
         password,
       });
-      if (remember) {
-        await AsyncStorage.setItem("authUser", JSON.stringify(user));
-      } else {
-        await AsyncStorage.removeItem("authUser");
-      }
+      await saveAuthUser(user, remember);
       setPassword("");
       setFeedback({ type: "success", message: `Đăng nhập thành công. Xin chào ${user.full_name}!` });
       if (Platform.OS === "web") {
@@ -147,6 +165,17 @@ export default function LoginScreen() {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <AppHeader />
+      {resetOpen && (
+        <PasswordResetDialog
+          identifier={identifier}
+          onClose={() => setResetOpen(false)}
+          onSuccess={() => {
+            setResetOpen(false);
+            setPassword("");
+            setFeedback({ type: "success", message: "Đã đổi mật khẩu. Bạn có thể đăng nhập bằng mật khẩu mới." });
+          }}
+        />
+      )}
 
       <ScrollView
         contentContainerStyle={s.content}
@@ -167,22 +196,11 @@ export default function LoginScreen() {
           Đăng nhập để tiếp tục hành trình ẩm thực của bạn
         </Text>
 
-        <Pressable
-          style={s.google}
-          onPress={() =>
-            Alert.alert(
-              "Google",
-              "Chức năng đăng nhập Google sẽ được kết nối sau.",
-            )
-          }
-        >
-          <Text style={s.googleLogo}>G</Text>
-          <Text style={s.googleText}>Tiếp tục với Google</Text>
-        </Pressable>
+        <GoogleLoginButton disabled={isSubmitting} onCredential={submitGoogleLogin} />
 
         <View style={s.dividerRow}>
           <View style={s.divider} />
-          <Text style={s.dividerText}>Hoặc đăng nhập với số điện thoại</Text>
+          <Text style={s.dividerText}>Hoặc đăng nhập bằng tài khoản</Text>
           <View style={s.divider} />
         </View>
 
@@ -206,17 +224,22 @@ export default function LoginScreen() {
           </Pressable>
         </View>
 
-        <Text style={s.label}>Số điện thoại</Text>
+        <Text style={s.label}>{mode === "otp" ? "Số điện thoại" : "Email hoặc số điện thoại"}</Text>
         <View style={s.inputRow}>
-          <Text style={s.flag}>🇻🇳</Text>
-          <Text style={s.prefix}>+84</Text>
-          <View style={s.verticalLine} />
+          {mode === "otp" && (
+            <>
+              <Text style={s.flag}>🇻🇳</Text>
+              <Text style={s.prefix}>+84</Text>
+              <View style={s.verticalLine} />
+            </>
+          )}
           <TextInput
             style={s.input}
-            placeholder="0912 345 678"
+            placeholder={mode === "otp" ? "0912 345 678" : "Nhập email hoặc số điện thoại"}
             placeholderTextColor="#B9A59B"
-            keyboardType="phone-pad"
-            autoComplete="tel"
+            keyboardType={mode === "otp" ? "phone-pad" : "email-address"}
+            autoComplete={mode === "otp" ? "tel" : "username"}
+            autoCapitalize="none"
             value={phone}
             onChangeText={(value) => {
               setPhone(value);
@@ -231,12 +254,8 @@ export default function LoginScreen() {
             <View style={s.labelRow}>
               <Text style={s.label}>Mật khẩu</Text>
               <Pressable
-                onPress={() =>
-                  Alert.alert(
-                    "Quên mật khẩu",
-                    "Chức năng đặt lại mật khẩu sẽ được xây dựng ở bước xác thực.",
-                  )
-                }
+                accessibilityRole="button"
+                onPress={() => setResetOpen(true)}
               >
                 <Text style={s.forgot}>Quên mật khẩu?</Text>
               </Pressable>
@@ -337,6 +356,9 @@ export default function LoginScreen() {
           </Pressable>
         </View>
 
+        <Pressable style={{alignItems:'center',padding:15,marginTop:12}} onPress={async () => { await logoutUser(); router.replace('/home'); }}>
+          <Text style={s.link}>Trải nghiệm ngay</Text>
+        </Pressable>
         <Text style={s.terms}>
           Bằng việc đăng nhập, bạn đồng ý với Điều khoản dịch vụ & Chính sách
           bảo mật của AI FOOD.
@@ -360,7 +382,14 @@ const s = StyleSheet.create({
   },
   brandRow: { flexDirection: "row", alignItems: "center", gap: 9 },
   brand: { color: C.orange, fontSize: 17, fontWeight: "800" },
-  content: { paddingHorizontal: 26, paddingBottom: 40 },
+  content: {
+    flexGrow: 1,
+    width: "100%",
+    maxWidth: 460,
+    alignSelf: "center",
+    paddingHorizontal: 24,
+    paddingBottom: 24,
+  },
   back: {
     marginTop: 10,
     width: 40,
@@ -371,6 +400,7 @@ const s = StyleSheet.create({
     alignItems: "center",
   },
   badge: {
+    alignSelf: "center",
     flexDirection: "row",
     alignItems: "center",
     gap: 7,
@@ -378,8 +408,9 @@ const s = StyleSheet.create({
     marginBottom: 12,
   },
   badgeText: { fontSize: 12, color: C.orange, fontWeight: "700" },
-  title: { fontSize: 27, fontWeight: "800", color: C.dark },
+  title: { fontSize: 27, fontWeight: "800", color: C.dark, textAlign: "center" },
   subtitle: {
+    textAlign: "center",
     color: C.muted,
     fontSize: 14,
     lineHeight: 22,
@@ -387,7 +418,7 @@ const s = StyleSheet.create({
   },
   google: {
     height: 53,
-    marginTop: 25,
+    marginTop: 20,
     backgroundColor: C.white,
     borderWidth: 1,
     borderColor: C.border,
@@ -403,7 +434,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 9,
-    marginVertical: 22,
+    marginVertical: 18,
   },
   divider: { flex: 1, height: 1, backgroundColor: C.border },
   dividerText: { fontSize: 11, color: C.muted },
@@ -413,7 +444,7 @@ const s = StyleSheet.create({
     borderRadius: 12,
     flexDirection: "row",
     padding: 4,
-    marginBottom: 20,
+    marginBottom: 16,
   },
   tab: {
     flex: 1,
@@ -505,7 +536,7 @@ const s = StyleSheet.create({
     color: C.white,
   },
   security: {
-    marginTop: 28,
+    marginTop: 20,
     backgroundColor: C.peach,
     borderRadius: 14,
     padding: 16,
@@ -521,7 +552,7 @@ const s = StyleSheet.create({
     textAlign: "center",
   },
   bottom: {
-    marginTop: 39,
+    marginTop: 24,
     flexDirection: "row",
     justifyContent: "center",
     alignItems: "center",
@@ -533,6 +564,6 @@ const s = StyleSheet.create({
     color: C.muted,
     lineHeight: 18,
     textAlign: "center",
-    marginTop: 32,
+    marginTop: 18,
   },
 });

@@ -1,0 +1,1 @@
+ALTER TABLE shopping_list_items MODIFY source_type ENUM('MANUAL','MEAL_PLAN','AI_PLAN') NOT NULL DEFAULT 'MANUAL'

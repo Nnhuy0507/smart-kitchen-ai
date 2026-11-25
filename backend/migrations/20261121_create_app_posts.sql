@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS app_posts (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  kind ENUM('community', 'announcement') NOT NULL DEFAULT 'community',
+  author_id BIGINT DEFAULT NULL,
+  title VARCHAR(120) NOT NULL,
+  body VARCHAR(3000) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_app_posts_kind_id (kind, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

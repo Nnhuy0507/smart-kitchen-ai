@@ -1,4 +1,7 @@
-import React, { useState } from "react";
+// Thành phần: Đầu trang dùng chung — thương hiệu và các nút tiện ích.
+import { useNotifications } from "../hooks/useNotifications";
+import { getAuthUser } from "../lib/auth";
+import React, { useCallback, useState } from "react";
 
 import {
   View,
@@ -10,7 +13,7 @@ import {
   Linking,
 } from "react-native";
 
-import { useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, usePathname, useRouter } from "expo-router";
 
 import {
   ChefHat,
@@ -46,13 +49,29 @@ const C = {
 
 export default function AppHeader({
   showBack = false,
-  showNotification = false,
+  showNotification = true,
   showHelp = true,
-  unreadCount = 0,
+  unreadCount,
   onNotificationPress,
   onHelpPress,
 }: AppHeaderProps) {
   const router = useRouter();
+  const pathname = usePathname();
+  const { from } = useLocalSearchParams<{ from?: string }>();
+  const eligiblePage = !["/", "/intro", "/login", "/register"].includes(pathname)
+    && (pathname !== "/onboarding-preferences" || from === "profile");
+  const [notificationUserId, setNotificationUserId] = useState<number | null>(null);
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    setNotificationUserId(null);
+    if (eligiblePage && showNotification) getAuthUser().then(user => {
+      if (active) setNotificationUserId(user?.user_id ?? null);
+    });
+    return () => { active = false; };
+  }, [eligiblePage, showNotification]));
+  const showNotificationButton = eligiblePage && showNotification && notificationUserId !== null;
+  const notifications = useNotifications(showNotificationButton);
+  const notificationCount = notifications.userId === notificationUserId ? unreadCount ?? notifications.unread : 0;
 
   const [helpVisible, setHelpVisible] = useState(false);
 
@@ -137,15 +156,21 @@ export default function AppHeader({
 
         {/* RIGHT */}
         <View style={styles.right}>
-          {showNotification && (
+          {showNotificationButton && (
             <Pressable
               style={styles.iconButton}
               onPress={handleNotification}
-              accessibilityLabel="Thông báo"
+              accessibilityLabel={notificationCount > 0 ? "Thông báo, " + notificationCount + " chưa đọc" : "Thông báo"}
             >
               <Bell size={21} color={C.orange} />
 
-              {unreadCount > 0 && <View style={styles.notificationDot} />}
+              {notificationCount > 0 && (
+                <View pointerEvents="none" style={styles.notificationBadge}>
+                  <Text allowFontScaling={false} style={styles.notificationBadgeText}>
+                    {notificationCount > 99 ? "99+" : notificationCount}
+                  </Text>
+                </View>
+              )}
             </Pressable>
           )}
 
@@ -308,17 +333,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  notificationDot: {
-    position: "absolute",
-    top: 5,
-    right: 5,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#E44836",
-    borderWidth: 1,
-    borderColor: C.white,
+  notificationBadge: {
+    position: "absolute", top: 1, right: 1, minWidth: 17, height: 17,
+    paddingHorizontal: 3, borderRadius: 9, borderWidth: 1, borderColor: C.white,
+    backgroundColor: "#C93626", alignItems: "center", justifyContent: "center",
   },
+  notificationBadgeText: { color: C.white, fontSize: 9, fontWeight: "700" },
 
   backButton: {
     width: 30,

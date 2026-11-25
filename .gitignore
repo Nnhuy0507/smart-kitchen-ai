@@ -39,3 +39,19 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Local signing key for community sessions
+backend/.session-secret
+backend/.ai-telemetry-secret
+
+# Local configuration and runtime data
+.env
+.env.*
+!.env.example
+backend/.ven/
+backend/.venv/
+backend/uploads/
+backend/backups/
+backend/model/
+__pycache__/
+*.pyc

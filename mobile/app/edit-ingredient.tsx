@@ -1,3 +1,5 @@
+import RequireLogin from "../components/RequireLogin";
+// Trang: Chỉnh sửa thông tin nguyên liệu trong kho.
 import React, { useCallback, useState } from "react";
 import {
   View,
@@ -20,6 +22,8 @@ import {
   Check,
   Package,
 } from "lucide-react-native";
+import { foodCategory, suggestedExpiry, type StorageLocation } from "../lib/foodStorage";
+import DateField from "../components/DateField";
 import BottomNav from "../components/BottomNav";
 import {
   Ingredient,
@@ -128,7 +132,7 @@ function SelectField({
     </View>
   );
 }
-export default function EditIngredient() {
+function EditIngredient() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const id = Array.isArray(params.id) ? params.id[0] : params.id;
@@ -142,6 +146,14 @@ export default function EditIngredient() {
   const [location, setLocation] = useState("Ngăn mát tủ lạnh");
   const [purchaseDate, setPurchaseDate] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
+  const detectedCategory = foodCategory(name);
+  const storageCategory = detectedCategory !== "Khác" ? detectedCategory
+    : ["Thịt", "Hải sản", "Thịt cá"].includes(category) ? "Thịt cá"
+    : ["Sữa", "Trứng", "Sữa & trứng"].includes(category) ? "Sữa & trứng"
+    : ["Rau củ", "Trái cây"].includes(category) ? "Rau củ" : "Khác";
+  const storageLocation: StorageLocation = location.includes("mát") ? "Ngăn mát"
+    : location.includes("đông") ? "Ngăn đông" : "Bên ngoài";
+  const recommendedExpiry = suggestedExpiry(name, storageCategory, storageLocation, purchaseDate);
   const [note, setNote] = useState("");
   useFocusEffect(
     useCallback(() => {
@@ -162,7 +174,7 @@ export default function EditIngredient() {
             setExpiryDate(found.expiryDate || "");
             setNote(found.note || "");
           }
-        } catch (e) {
+        } catch {
           Alert.alert("Lỗi", "Không thể đọc dữ liệu kho thực phẩm.");
         } finally {
           if (active) setLoading(false);
@@ -300,16 +312,13 @@ export default function EditIngredient() {
           </View>
           <View style={s.card}>
             <Text style={s.section}>Thời gian sử dụng</Text>
-            <Field
-              label="Ngày mua (YYYY-MM-DD)"
-              value={purchaseDate}
-              onChangeText={setPurchaseDate}
-            />
-            <Field
-              label="Hạn sử dụng (YYYY-MM-DD)"
-              value={expiryDate}
-              onChangeText={setExpiryDate}
-            />
+            <DateField title="Ngày mua" label="Ngày mua" value={purchaseDate} onChangeText={setPurchaseDate} maxDate={expiryDate} />
+            <DateField title="Hạn sử dụng" label="Hạn sử dụng" value={expiryDate} onChangeText={setExpiryDate} minDate={purchaseDate} />
+            {!!recommendedExpiry && recommendedExpiry !== expiryDate && (
+              <Pressable accessibilityRole="button" onPress={() => setExpiryDate(recommendedExpiry)}>
+                <Text style={s.expirySuggestion}>Dùng hạn gợi ý từ ngày mua · {recommendedExpiry}</Text>
+              </Pressable>
+            )}
           </View>
           <View style={s.card}>
             <Text style={s.section}>Ghi chú</Text>
@@ -347,6 +356,7 @@ export default function EditIngredient() {
   );
 }
 const s = StyleSheet.create({
+  expirySuggestion: { color: C.orange, fontWeight: "700", paddingVertical: 8 },
   screen: { flex: 1, backgroundColor: C.cream },
   center: {
     flex: 1,
@@ -433,3 +443,6 @@ const s = StyleSheet.create({
   },
   saveText: { color: "white", fontWeight: "800", fontSize: 14 },
 });
+
+// Người dùng khách cần đăng nhập trước khi truy cập chức năng cá nhân.
+export default function ProtectedPage() { return <RequireLogin><EditIngredient/></RequireLogin>; }
